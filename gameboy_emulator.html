@@ -1,1 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GameBoy Emulator — Loader / UI</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Roboto, "Helvetica Neue", Arial; background: #0b1220; color: #e6eef8; display:flex; gap:16px; padding:20px; }
+    .panel { background: #071029; padding:16px; border-radius:12px; box-shadow: 0 8px 30px rgba(0,0,0,0.6); }
+    #screen { background: black; image-rendering: pixelated; width:420px; height:378px; display:block; }
+    .controls { display:flex; gap:8px; margin-top:10px; }
+    button { padding:8px 12px; border-radius:8px; border:none; cursor:pointer; }
+    input[type=file] { color: transparent; }
+    .small { font-size:13px; color:#aab7c9; margin-top:8px; }
+    label.key { display:inline-block; min-width:56px; text-align:center; margin:4px; padding:6px; background:#0f2136; border-radius:6px; }
+    .kbd { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; }
+    .notice { font-size:12px; color:#f6d8d8; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div class="panel" style="width:460px;">
+    <h2 style="margin:0 0 8px 0;">GameBoy Emulator — Loader</h2>
+
+    <!-- ROM loader -->
+    <div>
+      <input id="romfile" type="file" accept=".gb,.gbc" />
+      <div class="controls">
+        <button id="loadBtn">Load ROM</button>
+        <button id="pauseBtn">Pause</button>
+        <button id="resetBtn">Reset</button>
+        <button id="saveStateBtn">Save State</button>
+        <button id="loadStateBtn">Load State</button>
+      </div>
+      <div class="small">Tip: load only ROMs you legally own. This page does not provide ROMs.</div>
+    </div>
+
+    <!-- Canvas for video -->
+    <div style="margin-top:12px;">
+      <canvas id="screen" width="160" height="144"></canvas>
+    </div>
+
+    <div class="notice">
+      Keyboard controls: Arrow keys = D-pad, Z = A, X = B, Enter = Start, Shift = Select.
+    </div>
+  </div>
+
+  <div class="panel" style="flex:1; min-width:320px;">
+    <h3 style="margin:0 0 8px 0;">Status & Debug</h3>
+    <div id="status">Idle — no ROM loaded.</div>
+    <pre id="log" style="height:360px; overflow:auto; background:#06101a; padding:10px; border-radius:8px;"></pre>
+  </div>
+
+<script>
+/*
+  gameboy_emulator.html
+  - This is a loader / UI wrapper for a JS GameBoy emulator core.
+  - It expects a global `emulator` object to exist (from whichever JS core you include).
+    The wrapper will call the following (if present):
+      emulator.init({canvas, audioContext})        // optional init hook
+      emulator.loadROM(arrayBuffer)               // must accept ArrayBuffer of ROM
+      emulator.reset()                             // reset CPU / state
+      emulator.stepFrame() -> imageData / null     // render one frame (preferred)
+      emulator.pressKey(keyName)                   // 'A','B','UP','DOWN','LEFT','RIGHT','START','SELECT'
+      emulator.releaseKey(keyName)
+      emulator.saveState() -> ArrayBuffer / object
+      emulator.loadState(state)
+  - If your chosen emulator uses different function names, adapt the adapter functions below.
+
+  Recommended cores / where to get them:
+   - jsGB (github.com/Two9A/jsGB) — a long-standing JS GB codebase.
+   - GameBoy-Online / Grant Galitz forks (github.com/taisel/GameBoy-Online).
+   - Imran Nazar's tutorial series is a great read if you want to implement pieces yourself.
+  (I won't provide ROMs or help download copyrighted games.)
+*/
+
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+
+let running = false;
+let romBuffer = null;
+let animationTimer = null;
+let lastFrameTime = 0;
+
+// Simple logging helper
+function log(...args) {
+  const t = new Date().toISOString().slice(11,23);
+  logEl.textContent += `[${t}] ` + args.join(' ') + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// Adapter / shim: maps our loader's calls to whichever emulator core you include.
+// If you include an emulator that exposes different functions, change these calls.
+const core = {
+  // presence-check helpers
+  has(name) { return typeof (window.emulator && window.emulator[name]) === 'function'; },
+
+  async init() {
+    if (this.has('init')) {
+      try {
+        // optionally pass canvas/context/audioCtx etc
+        const audioCtx = (window.AudioContext || window.webkitAudioContext) ? new (window.AudioContext || window.webkitAudioContext)() : null;
+        await window.emulator.init({ canvas, ctx, audioCtx });
+        log("Core init succeeded.");
+      } catch (e) {
+        log("Core.init error:", e);
+      }
+    } else {
+      log("Core has no init(); continuing.");
+    }
+  },
+
+  async loadROM(arrayBuffer) {
+    if (!window.emulator) throw new Error("No emulator core loaded (window.emulator missing).");
+    if (this.has('loadROM')) {
+      await window.emulator.loadROM(arrayBuffer);
+      log("Core loaded ROM (via loadROM).");
+    } else if (this.has('load')) {
+      // some cores use load()
+      await window.emulator.load(arrayBuffer);
+      log("Core loaded ROM (via load).");
+    } else {
+      throw new Error("Emulator core has no ROM loader method (expected loadROM/load).");
+    }
+  },
+
+  reset() {
+    if (this.has('reset')) { window.emulator.reset(); log("Core reset."); }
+    else log("Core has no reset()");
+  },
+
+  stepFrame() {
+    // Preferred: core returns ImageData or draws to canvas itself.
+    if (this.has('stepFrame')) {
+      return window.emulator.stepFrame();
+    } else if (this.has('frame')) {
+      return window.emulator.frame();
+    } else {
+      // If the core does not have stepFrame, we can't drive frames here.
+      throw new Error("Core doesn't provide stepFrame/frame — adapt this wrapper to your core's API.");
+    }
+  },
+
+  pressKey(key) { if (this.has('pressKey')) window.emulator.pressKey(key); else if (this.has('keyDown')) window.emulator.keyDown(key); },
+  releaseKey(key) { if (this.has('releaseKey')) window.emulator.releaseKey(key); else if (this.has('keyUp')) window.emulator.keyUp(key); },
+
+  saveState() {
+    if (this.has('saveState')) return window.emulator.saveState();
+    log("Core has no saveState()");
+    return null;
+  },
+  loadState(s) {
+    if (this.has('loadState')) { window.emulator.loadState(s); log("State loaded"); }
+    else log("Core has no loadState()");
+  }
+};
+
+// Animation / frame loop
+async function runLoop(timestamp) {
+  if (!running) return;
+  try {
+    // Call the core to run one frame and get back image data OR let core draw to canvas.
+    const out = core.stepFrame();
+    // If core returned an ImageData-like object, blit it:
+    if (out && out.data && out.width && out.height) {
+      // scale to canvas size
+      ctx.putImageData(out, 0, 0);
+    }
+    // Otherwise we assume core drew onto canvas itself.
+  } catch (err) {
+    log("Frame error:", err);
+    running = false;
+    statusEl.textContent = "Error during emulation — see log.";
+    return;
+  }
+  animationTimer = requestAnimationFrame(runLoop);
+}
+
+// UI buttons
+document.getElementById('loadBtn').addEventListener('click', async () => {
+  const f = document.getElementById('romfile').files[0];
+  if (!f) { alert("Choose a .gb/.gbc file first."); return; }
+  romBuffer = await f.arrayBuffer();
+  statusEl.textContent = `ROM loaded: ${f.name} (${romBuffer.byteLength} bytes)`;
+  log(`ROM selected: ${f.name}`);
+  try {
+    await core.init();
+    await core.loadROM(romBuffer);
+    // start running
+    running = true;
+    if (animationTimer) cancelAnimationFrame(animationTimer);
+    animationTimer = requestAnimationFrame(runLoop);
+    statusEl.textContent = "Running";
+  } catch (e) {
+    log("Error loading ROM into core:", e);
+    statusEl.textContent = "Error loading ROM into core — check log.";
+  }
+});
+
+document.getElementById('pauseBtn').addEventListener('click', () => {
+  running = !running;
+  if (running) {
+    animationTimer = requestAnimationFrame(runLoop);
+    document.getElementById('pauseBtn').textContent = 'Pause';
+    statusEl.textContent = 'Running';
+  } else {
+    cancelAnimationFrame(animationTimer);
+    document.getElementById('pauseBtn').textContent = 'Resume';
+    statusEl.textContent = 'Paused';
+  }
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  try { core.reset(); log("Reset pressed"); statusEl.textContent = 'Reset'; } catch (e) { log(e); }
+});
+
+let savedState = null;
+document.getElementById('saveStateBtn').addEventListener('click', () => {
+  try {
+    savedState = core.saveState();
+    log("Saved state:", savedState ? "(state object)" : "null");
+    statusEl.textContent = 'State saved';
+  } catch (e) { log("saveState error:", e); }
+});
+document.getElementById('loadStateBtn').addEventListener('click', () => {
+  try {
+    if (!savedState) { alert("No saved state available."); return; }
+    core.loadState(savedState);
+    statusEl.textContent = 'State loaded';
+  } catch (e) { log("loadState error:", e); }
+});
+
+// Keyboard -> GameBoy mapping
+const keyMap = {
+  'ArrowLeft': 'LEFT',
+  'ArrowRight': 'RIGHT',
+  'ArrowUp': 'UP',
+  'ArrowDown': 'DOWN',
+  'z': 'A',
+  'x': 'B',
+  'Z': 'A',
+  'X': 'B',
+  'Enter': 'START',
+  'Shift': 'SELECT'
+};
+
+window.addEventListener('keydown', (ev) => {
+  const key = keyMap[ev.key];
+  if (key) {
+    ev.preventDefault();
+    core.pressKey(key);
+  }
+});
+window.addEventListener('keyup', (ev) => {
+  const key = keyMap[ev.key];
+  if (key) {
+    ev.preventDefault();
+    core.releaseKey(key);
+  }
+});
+
+// Helper: if an emulator core loads itself via script tag and sets window.emulator,
+// you can drop its <script src="..."></script> into this HTML just before </body>.
+// Example (do NOT paste copyrighted ROM into this file):
+// <script src="path/to/your/emulator-core.js"></script>
+// After adding it, the 'Load ROM' button above will attempt to call the core methods.
+
+log("Wrapper ready. Add an emulator core to window.emulator or adapt the adapter above.");
+</script>
+
+<!--
+  How to integrate an emulator core:
+  1) Choose an open-source JS core (examples: jsGB, GameBoy-Online).
+     - Clone or download the repo, build if needed, and include the built JS file here:
+       <script src="path/to/core.js"></script>
+  2) Inspect the core's API (what functions it exposes). If it uses different names,
+     edit the `core` adapter in this file to call the correct functions.
+  3) Open this file in your browser and load a legal .gb / .gbc file using the file chooser.
+-->
+
+</body>
+</html>
 
