@@ -279,6 +279,22 @@ log("Wrapper ready. Add an emulator core to window.emulator or adapt the adapter
   3) Open this file in your browser and load a legal .gb / .gbc file using the file chooser.
 -->
 <script src="gameboy.js"></script>  <!-- or whatever the filename is -->
+<script src="GameBoyCore.js"></script>
+<script src="GameBoyIO.js"></script>
+<script src="GameBoyAudio.js"></script>
+<script src="GameBoySaveState.js"></script>
+<script src="your_script.js"></script>
+<script>
+const canvas = document.getElementById('screen');
+document.getElementById('romInput').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (file) {
+    const arrayBuffer = await file.arrayBuffer();
+    const byteArray = new Uint8Array(arrayBuffer);
+    start(canvas, byteArray);
+  }
+});
+</script>
 
 </body>
 </html>
